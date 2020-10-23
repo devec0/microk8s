@@ -17,17 +17,25 @@ from urllib.error import URLError
 from urllib.parse import ParseResult, urlparse
 from urllib.request import urlopen
 
+
 MIN_MEM_GB = 14
 CONNECTIVITY_CHECKS = [
     'https://api.jujucharms.com/charmstore/v5/~kubeflow-charmers/ambassador-88/icon.svg',
 ]
 
 
+def kubectl_exists(resource):
+    try:
+        run('microk8s-kubectl.wrapper', 'get', '-nkubeflow', resource, die=False)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+
 def retry_run(*args, die=True, debug=False, stdout=True, times=3):
     for attempt in range(1, times + 1):
         try:
-            result = run(*args, die=(times == attempt and die), debug=debug, stdout=stdout)
-            return result
+            return run(*args, die=(times == attempt and die), debug=debug, stdout=stdout)
         except subprocess.CalledProcessError as err:
             if times == attempt:
                 raise
@@ -35,7 +43,6 @@ def retry_run(*args, die=True, debug=False, stdout=True, times=3):
                 if debug and stdout:
                     print(err)
                     print("Retrying.")
-                attempt += 1
 
 
 def run(*args, die=True, debug=False, stdout=True):
@@ -204,8 +211,9 @@ def get_hostname():
 
 
 def main():
+
     args = {
-        'bundle': os.environ.get("KUBEFLOW_BUNDLE") or "cs:kubeflow-213",
+        'bundle': os.environ.get("KUBEFLOW_BUNDLE") or "cs:kubeflow-222",
         'channel': os.environ.get("KUBEFLOW_CHANNEL") or "stable",
         'debug': os.environ.get("KUBEFLOW_DEBUG") or "false",
         'hostname': os.environ.get("KUBEFLOW_HOSTNAME") or None,
@@ -268,17 +276,13 @@ def main():
     # user to specify a full charm store URL if they'd like, such as
     # `cs:kubeflow-lite-123`.
     if args['bundle'] == 'full':
-        bundle = 'cs:kubeflow-219'
-        bundle_type = 'full'
+        bundle = 'cs:kubeflow-224'
     elif args['bundle'] == 'lite':
-        bundle = 'cs:kubeflow-lite-6'
-        bundle_type = 'lite'
+        bundle = 'cs:kubeflow-lite-11'
     elif args['bundle'] == 'edge':
-        bundle = 'cs:kubeflow-edge-6'
-        bundle_type = 'edge'
+        bundle = 'cs:kubeflow-edge-11'
     else:
         bundle = args['bundle']
-        bundle_type = 'full'
 
     for service in [
         "dns",
@@ -314,7 +318,7 @@ def main():
         print("Kubeflow has already been enabled.")
         sys.exit(1)
 
-    print("Deploying Kubeflow...")
+    print("Bootstrapping...")
     if args['no_proxy'] is not None:
         juju("bootstrap", "microk8s", "uk8s", "--config=juju-no-proxy=%s" % args['no_proxy'])
         juju("add-model", "kubeflow", "microk8s")
@@ -322,7 +326,9 @@ def main():
     else:
         juju("bootstrap", "microk8s", "uk8s")
         juju("add-model", "kubeflow", "microk8s")
+    print("Bootstrap complete.")
 
+    print("Successfully bootstrapped, deploying...")
     juju("deploy", bundle, "--channel", args['channel'])
 
     print("Kubeflow deployed.")
@@ -347,7 +353,7 @@ def main():
     print("Operator pods ready.")
     print("Waiting for service pods to become ready.")
 
-    if bundle_type in ('full', 'lite'):
+    if kubectl_exists('service/pipelines-api'):
         with tempfile.NamedTemporaryFile(mode='w+') as f:
             json.dump(
                 {
@@ -368,6 +374,20 @@ def main():
             f.flush()
             run('microk8s-kubectl.wrapper', 'apply', '-f', f.name)
 
+    hostname = parse_hostname(args['hostname'] or get_hostname())
+
+    if kubectl_exists('service/dex-auth'):
+        juju("config", "dex-auth", "public-url=%s" % hostname.geturl())
+
+    print("ASDF")
+    if kubectl_exists('service/oidc-gatekeeper'):
+        print("FDSA")
+        juju("config", "oidc-gatekeeper", "public-url=%s" % hostname.geturl())
+
+    if kubectl_exists('service/ambassador'):
+        juju("config", "ambassador", "juju-external-hostname=%s" % hostname.hostname)
+        juju("expose", "ambassador")
+
     retry_run(
         "microk8s-kubectl.wrapper",
         "wait",
@@ -380,23 +400,9 @@ def main():
         times=100,
     )
 
-    if bundle_type == 'full':
-        run(
-            'microk8s-kubectl.wrapper',
-            'delete',
-            'mutatingwebhookconfigurations/katib-mutating-webhook-config',
-            'validatingwebhookconfigurations/katib-validating-webhook-config',
-        )
-
     print("Congratulations, Kubeflow is now available.")
 
-    if bundle_type in ('full', 'lite'):
-        hostname = parse_hostname(args['hostname'] or get_hostname())
-        juju("config", "dex-auth", "public-url=%s" % hostname.geturl())
-        juju("config", "oidc-gatekeeper", "public-url=%s" % hostname.geturl())
-        juju("config", "ambassador", "juju-external-hostname=%s" % hostname.hostname)
-        juju("expose", "ambassador")
-
+    if kubectl_exists('service/ambassador'):
         print(
             textwrap.dedent(
                 """
