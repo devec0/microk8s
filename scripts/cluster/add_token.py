@@ -31,9 +31,15 @@ def add_token_with_expiry(token, file, ttl):
     with open(file, 'a+') as fp:
         if ttl != -1:
             expiry = int(round(time.time())) + ttl
-            fp.write(token_with_expiry.format(token, expiry))
+            token_entry = token_with_expiry.format(token, expiry)
         else:
-            fp.write(token_without_expiry.format(token))
+            token_entry = token_without_expiry.format(token)
+
+        try:
+            fp.write(token_entry)
+        except OSError:
+            return False
+    return True
 
 
 if __name__ == '__main__':
@@ -73,4 +79,6 @@ if __name__ == '__main__':
         print("Invalid token size.  It must be 32 characters long.")
         exit(1)
 
-    add_token_with_expiry(token, cluster_tokens_file, ttl)
+    if add_token_with_expiry(token, cluster_tokens_file, ttl):
+        return token
+    return False
